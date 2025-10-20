@@ -1,3 +1,3 @@
 module.exports = {
-  urlDev: 'http://dingdocs-plugin.yuce-tech.cn/',
+  urlDev: 'https://dingdocs-plugin.yuce-tech.cn/',
 };
