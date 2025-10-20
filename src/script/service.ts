@@ -321,13 +321,15 @@ async function mergeSheets(params: {
   targetSheetId?: string;
 }) {
   try {
+    console.log('开始合并数据表，参数:', params);
     const { selectedSheetIds, mergeSheetName, mergeMode, targetSheetId } = params;
     
-    if (!selectedSheetIds || selectedSheetIds.length < 2) {
-      throw new Error('至少需要选择2个数据表进行合并');
+    if (!selectedSheetIds || selectedSheetIds.length < 1) {
+      throw new Error('请至少选择1个数据表进行合并');
     }
 
     const base = DingdocsScript.base;
+    console.log('获取到base对象:', !!base);
     
     // 获取所有要合并的数据表
     const sheetsToMerge = selectedSheetIds.map(sheetId => {
@@ -397,16 +399,25 @@ async function mergeSheets(params: {
       
       // 合并所有记录
       for (const sheet of sheetsToMerge) {
-        const records = await getAllRecordsFromSheet(sheet);
-        
-        // 转换记录数据以匹配新字段结构
-        const transformedRecords = records.map(record => ({
-          fields: transformRecordFieldsWithMapping(record, fieldMapping, fieldNameMapping, sheet.getName(), targetSheet)
-        }));
-        
-        if (transformedRecords.length > 0) {
-          await targetSheet.insertRecordsAsync(transformedRecords);
-          totalRecords += transformedRecords.length;
+        console.log('开始处理数据表:', sheet.getName());
+        try {
+          const records = await getAllRecordsFromSheet(sheet);
+          console.log(`数据表 ${sheet.getName()} 有 ${records.length} 条记录`);
+          
+          // 转换记录数据以匹配新字段结构
+          const transformedRecords = records.map(record => ({
+            fields: transformRecordFieldsWithMapping(record, fieldMapping, fieldNameMapping, sheet.getName(), targetSheet)
+          }));
+          
+          if (transformedRecords.length > 0) {
+            console.log(`准备插入 ${transformedRecords.length} 条记录到目标表`);
+            await targetSheet.insertRecordsAsync(transformedRecords);
+            totalRecords += transformedRecords.length;
+            console.log(`成功插入 ${transformedRecords.length} 条记录`);
+          }
+        } catch (error: any) {
+          console.error(`处理数据表 ${sheet.getName()} 时出错:`, error.message);
+          throw new Error(`处理数据表 ${sheet.getName()} 失败: ${error.message}`);
         }
       }
 
@@ -419,116 +430,87 @@ async function mergeSheets(params: {
       };
 
     } else if (mergeMode === 'overwrite') {
-      // 覆盖模式 - 智能字段映射
+      // 覆盖模式 - 删除目标表后重新创建
       if (!targetSheetId) {
         throw new Error('请选择目标数据表');
       }
 
-      targetSheet = base.getSheet(targetSheetId);
-      if (!targetSheet) {
+      const originalTargetSheet = base.getSheet(targetSheetId);
+      if (!originalTargetSheet) {
         throw new Error('未找到目标数据表');
       }
 
-      // 清空目标表的所有记录
-      const existingRecords = await getAllRecordsFromSheet(targetSheet);
-      if (existingRecords.length > 0) {
-        const recordIds = existingRecords.map(record => record.getId());
-        await targetSheet.deleteRecordsAsync(recordIds);
-      }
+      // 获取目标表名称
+      const targetSheetName = originalTargetSheet.getName();
+      console.log('目标表名称:', targetSheetName);
 
-      // 获取目标表原有字段
-      const originalTargetFields = targetSheet.getFields();
-      const originalFieldNames = originalTargetFields.map((field: any) => field.getName());
+      // 删除目标表
+      console.log('删除目标表:', targetSheetName);
+      base.deleteSheet(targetSheetId);
+
+      // 使用创建新表的逻辑，但使用目标表的名称
+      console.log('使用目标表名称重新创建:', targetSheetName);
       
-      // 使用独立的字段映射分析（覆盖模式）
-      const fieldMapping = analyzeFieldMappingForOverwrite(sheetsToMerge);
-      
-      // 删除目标表的所有字段（除了主键字段）
-      const remainingFields: any[] = [];
-      for (const field of originalTargetFields) {
-        try {
-          // 检查是否是主键字段
-          if (field.isPrimary && field.isPrimary()) {
-            console.log('跳过主键字段:', field.getName());
-            remainingFields.push(field);
-          } else {
-            targetSheet.deleteField(field.getId());
-            console.log('成功删除字段:', field.getName());
-          }
-        } catch (error: any) {
-          console.log('无法删除字段:', field.getName(), '错误:', error.message);
-          remainingFields.push(field);
-        }
-      }
-      
-      // 获取剩余字段的名称，用于冲突检测
-      const remainingFieldNames = new Set(remainingFields.map(f => f.getName()));
-      console.log('剩余字段:', Array.from(remainingFieldNames));
+      // 分析字段映射
+      const fieldMapping = analyzeFieldMapping(sheetsToMerge);
       
       // 准备字段配置，包含来源字段
-      const allFieldsToCreate = [
-        ...fieldMapping.commonFields,  // 公共字段在前
-        ...fieldMapping.nonCommonFields,  // 非公共字段在后
+      const allFieldConfigs = [
+        ...fieldMapping.fields.map(field => ({
+          name: field.name,
+          type: field.type,
+          property: field.property
+        })),
         {
           name: '合并来源',
           type: 'text'
         }
       ];
       
-      for (const fieldConfig of allFieldsToCreate) {
-        let fieldName = fieldConfig.name;
-        let counter = 1;
-        
-        // 检查字段名冲突（包括剩余字段）
-        while (remainingFieldNames.has(fieldName)) {
-          fieldName = `${fieldConfig.name}_${counter}`;
-          counter++;
-        }
-        
-        try {
-          console.log('创建字段:', fieldName, '类型:', fieldConfig.type);
-          const field = targetSheet.insertField({
-            name: fieldName,
-            type: fieldConfig.type as any
-          });
-          
-          // 如果是单选或多选字段，添加选项
-          if ((fieldConfig.type === 'singleSelect' || fieldConfig.type === 'multiSelect') && fieldConfig.property?.choices) {
-            const options = fieldConfig.property.choices.map((choice: any) => ({ name: choice.name }));
-            if (options.length > 0) {
-              console.log('为字段', fieldName, '添加选项:', options);
-              field.addOptions(options);
-            }
-          }
-        } catch (error: any) {
-          console.error(`创建字段 "${fieldName}" 失败:`, error.message);
-          // 如果字段创建失败，尝试使用备用名称
-          const backupName = `${fieldConfig.name}_备用${counter}`;
-          try {
-            const field = targetSheet.insertField({
-              name: backupName,
-              type: fieldConfig.type as any
-            });
-            console.log('使用备用名称创建字段:', backupName);
-          } catch (backupError: any) {
-            console.error(`备用字段 "${backupName}" 也创建失败:`, backupError.message);
-          }
-        }
+      console.log('准备创建的字段:', allFieldConfigs.map(f => f.name));
+      
+      // 使用目标表名称创建新表
+      targetSheet = base.insertSheet(targetSheetName, allFieldConfigs as any);
+      
+      // 检查创建后的字段
+      const createdFields = targetSheet.getFields();
+      console.log('创建新表后的字段数量:', createdFields.length);
+      console.log('创建后的字段列表:', createdFields.map((f: any) => f.getName()));
+      
+      // 创建字段名映射表
+      const fieldNameMapping = new Map<string, string>();
+      for (let i = 0; i < allFieldConfigs.length; i++) {
+        const originalName = allFieldConfigs[i].name;
+        const actualName = createdFields[i] ? createdFields[i].getName() : originalName;
+        fieldNameMapping.set(originalName, actualName);
       }
       
-
+      // 检查最终字段数量
+      const finalFields = targetSheet.getFields();
+      console.log('所有字段创建完成后的字段数量:', finalFields.length);
+      console.log('最终字段列表:', finalFields.map((f: any) => f.getName()));
+      
       // 合并所有记录
       for (const sheet of sheetsToMerge) {
-        const records = await getAllRecordsFromSheet(sheet);
-        
-        // 转换记录数据以匹配新的字段结构
-        const transformedRecords = records.map(record => ({
-          fields: transformRecordFieldsForOverwrite(record, fieldMapping, sheet.getName(), targetSheet)
-        }));
-        
-        if (transformedRecords.length > 0) {
-          await targetSheet.insertRecordsAsync(transformedRecords);
-          totalRecords += transformedRecords.length;
+        console.log('开始处理数据表:', sheet.getName());
+        try {
+          const records = await getAllRecordsFromSheet(sheet);
+          console.log(`数据表 ${sheet.getName()} 有 ${records.length} 条记录`);
+          
+          // 转换记录数据以匹配新字段结构
+          const transformedRecords = records.map(record => ({
+            fields: transformRecordFieldsWithMapping(record, fieldMapping, fieldNameMapping, sheet.getName(), targetSheet)
+          }));
+          
+          if (transformedRecords.length > 0) {
+            console.log(`准备插入 ${transformedRecords.length} 条记录到目标表`);
+            await targetSheet.insertRecordsAsync(transformedRecords);
+            totalRecords += transformedRecords.length;
+            console.log(`成功插入 ${transformedRecords.length} 条记录`);
+          }
+        } catch (error: any) {
+          console.error(`处理数据表 ${sheet.getName()} 时出错:`, error.message);
+          throw new Error(`处理数据表 ${sheet.getName()} 失败: ${error.message}`);
         }
       }
 
@@ -536,7 +518,7 @@ async function mergeSheets(params: {
         id: targetSheet.getId(),
         name: targetSheet.getName(),
         totalRecords,
-        totalFields: allFieldsToCreate.length + 1, // +1 for source field
+        totalFields: finalFields.length,
         mergedSheets: sheetsToMerge.map(sheet => sheet.getName())
       };
 
@@ -563,16 +545,25 @@ async function mergeSheets(params: {
 
       // 追加所有记录
       for (const sheet of sheetsToMerge) {
-        const records = await getAllRecordsFromSheet(sheet);
-        
-        // 转换记录数据以匹配目标字段结构
-        const transformedRecords = records.map(record => ({
-          fields: transformRecordFieldsForExistingSheet(record, targetSheet, sheet.getName())
-        }));
-        
-        if (transformedRecords.length > 0) {
-          await targetSheet.insertRecordsAsync(transformedRecords);
-          addedRecords += transformedRecords.length;
+        console.log('开始处理数据表:', sheet.getName());
+        try {
+          const records = await getAllRecordsFromSheet(sheet);
+          console.log(`数据表 ${sheet.getName()} 有 ${records.length} 条记录`);
+          
+          // 转换记录数据以匹配目标字段结构
+          const transformedRecords = records.map(record => ({
+            fields: transformRecordFieldsForExistingSheet(record, targetSheet, sheet.getName())
+          }));
+          
+          if (transformedRecords.length > 0) {
+            console.log(`准备插入 ${transformedRecords.length} 条记录到目标表`);
+            await targetSheet.insertRecordsAsync(transformedRecords);
+            addedRecords += transformedRecords.length;
+            console.log(`成功插入 ${transformedRecords.length} 条记录`);
+          }
+        } catch (error: any) {
+          console.error(`处理数据表 ${sheet.getName()} 时出错:`, error.message);
+          throw new Error(`处理数据表 ${sheet.getName()} 失败: ${error.message}`);
         }
       }
 
@@ -642,27 +633,25 @@ function analyzeFieldMapping(sheets: any[]) {
     });
   });
 
-  // 构建最终字段列表：保持第一个表的字段顺序，公共字段在前，独有字段在后
-  const firstSheetFields = sheets[0].getFields();
-  const firstSheetFieldNames = firstSheetFields.map((f: any) => f.getName());
+  // 构建最终字段列表：公共字段在前，独有字段在后
   const finalFields: any[] = [];
   const processedFields = new Set<string>();
   
-  // 1. 按第一个表的顺序添加公共字段
-  firstSheetFieldNames.forEach(fieldName => {
-    if (fieldMap.has(fieldName)) {
-      const fieldData = fieldMap.get(fieldName)!;
+  // 1. 首先添加所有公共字段（在多个表中都存在的字段）
+  for (const [fieldName, fieldData] of fieldMap) {
+    if (fieldData.count > 1) { // 公共字段
       finalFields.push({
         name: fieldData.name,
         type: fieldData.type,
         property: fieldData.options ? { choices: fieldData.options } : undefined
       });
       processedFields.add(fieldName);
+      console.log(`公共字段: ${fieldData.name} (出现在 ${fieldData.count} 个表中)`);
     }
-  });
+  }
   
-  // 2. 添加其他表中独有的字段（按表顺序）
-  sheets.slice(1).forEach(sheet => {
+  // 2. 然后添加独有字段（只在一个表中存在的字段）
+  sheets.forEach(sheet => {
     const fields = sheet.getFields();
     fields.forEach((field: any) => {
       const fieldName = field.getName();
@@ -709,16 +698,32 @@ function mergeFieldOptions(existingOptions: any[], newOptions: any[]) {
 // 根据字段名称和选项名称查找匹配的选项ID
 function findMatchingOptionId(fieldName: string, optionName: string, targetSheet: any) {
   try {
+    console.log(`查找字段 ${fieldName} 的选项 ${optionName}`);
     const field = targetSheet.getField(fieldName);
-    if (field && field.getOptions) {
-      const options = field.getOptions();
-      const matchingOption = options.find((option: any) => option.name === optionName);
-      return matchingOption ? matchingOption.id : null;
+    if (!field) {
+      console.log(`字段 ${fieldName} 不存在`);
+      return null;
     }
-  } catch (error) {
-    console.log(`查找字段 ${fieldName} 的选项时出错:`, error);
+    
+    if (field.getOptions) {
+      const options = field.getOptions();
+      console.log(`字段 ${fieldName} 的选项:`, options.map((opt: any) => opt.name));
+      const matchingOption = options.find((option: any) => option.name === optionName);
+      if (matchingOption) {
+        console.log(`找到匹配选项: ${optionName} -> ${matchingOption.id}`);
+        return matchingOption.id;
+      } else {
+        console.log(`未找到匹配选项: ${optionName}`);
+        return null;
+      }
+    } else {
+      console.log(`字段 ${fieldName} 没有选项`);
+      return null;
+    }
+  } catch (error: any) {
+    console.error(`查找字段 ${fieldName} 的选项时出错:`, error.message);
+    return null;
   }
-  return null;
 }
 
 // 分析覆盖模式的字段映射
@@ -914,18 +919,41 @@ async function getAllRecordsFromSheet(sheet: any) {
   const allRecords: any[] = [];
   let hasMore = true;
   let cursor = '';
+  let pageCount = 0;
+  const maxPages = 50; // 限制最大页数，避免超时
   
-  while (hasMore) {
-    const result = await sheet.getRecordsAsync({
-      pageSize: 100,
-      cursor: cursor
-    });
-    
-    allRecords.push(...result.records);
-    hasMore = result.hasMore;
-    cursor = result.cursor;
+  console.log('开始获取数据表记录:', sheet.getName());
+  
+  while (hasMore && pageCount < maxPages) {
+    try {
+      console.log(`获取第 ${pageCount + 1} 页记录，cursor: ${cursor}`);
+      const result = await sheet.getRecordsAsync({
+        pageSize: 50, // 减小页面大小，避免单次请求过大
+        cursor: cursor
+      });
+      
+      allRecords.push(...result.records);
+      hasMore = result.hasMore;
+      cursor = result.cursor;
+      pageCount++;
+      
+      console.log(`第 ${pageCount} 页获取到 ${result.records.length} 条记录，总计: ${allRecords.length}`);
+      
+      // 添加小延迟避免API调用过于频繁
+      if (hasMore) {
+        await new Promise(resolve => setTimeout(resolve, 200));
+      }
+    } catch (error: any) {
+      console.error(`获取第 ${pageCount + 1} 页记录失败:`, error.message);
+      throw new Error(`获取数据表记录失败: ${error.message}`);
+    }
   }
   
+  if (pageCount >= maxPages) {
+    console.warn(`数据表 ${sheet.getName()} 记录过多，已获取前 ${maxPages} 页，共 ${allRecords.length} 条记录`);
+  }
+  
+  console.log(`数据表 ${sheet.getName()} 总共获取到 ${allRecords.length} 条记录`);
   return allRecords;
 }
 
