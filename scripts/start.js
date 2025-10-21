@@ -4,6 +4,13 @@
 process.env.BABEL_ENV = 'development';
 process.env.NODE_ENV = 'development';
 
+// 设置WebSocket配置用于域名部署
+process.env.HTTPS = 'true';
+process.env.WDS_SOCKET_HOST = 'dingdocs-plugin.yuce-tech.cn';
+process.env.WDS_SOCKET_PORT = '443';
+process.env.WDS_SOCKET_PATH = '/ws';
+process.env.DANGEROUSLY_DISABLE_HOST_CHECK = 'true';
+
 // Makes the script crash on unhandled rejections instead of silently
 // ignoring them. In the future, promise rejections that are not handled will
 // terminate the Node.js process with a non-zero exit code.
@@ -39,7 +46,7 @@ const useYarn = fs.existsSync(paths.yarnLockFile);
 const isInteractive = process.stdout.isTTY;
 
 // Tools like Cloud9 rely on this.
-const DEFAULT_PORT = parseInt(443, 10) || 3000;
+const DEFAULT_PORT = parseInt(process.env.PORT, 10) || 443;
 const HOST = process.env.HOST || '0.0.0.0';
 
 if (process.env.HOST) {
@@ -75,7 +82,7 @@ checkBrowsers(paths.appPath, isInteractive)
     }
 
     const config = configFactory('development');
-    const protocol = process.env.HTTPS === 'true' ? 'https' : 'http';
+    const protocol = 'https'; // 强制使用HTTPS
     const appName = require(paths.appPackageJson).name;
 
     const useTypeScript = fs.existsSync(paths.appTsConfig);
